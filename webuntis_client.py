@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+import html
+import json
+import re
+import time
 from typing import Any
 
+import requests
 import webuntis
 
 from config import Settings
@@ -13,6 +18,8 @@ class WebUntisClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.session: webuntis.Session | None = None
+        self.http: requests.Session | None = None
+        self.server = settings.server
 
     def __enter__(self) -> "WebUntisClient":
         if self.settings.qr_uri:
@@ -20,6 +27,8 @@ class WebUntisClient:
                 self.settings.qr_uri,
                 self.settings.useragent,
             )
+            self.server = server
+            self.http = http
         elif self.settings.app_secret:
             server = self.settings.server
             school = self.settings.school
@@ -31,6 +40,8 @@ class WebUntisClient:
                 self.settings.app_secret,
                 self.settings.useragent,
             )
+            self.server = server
+            self.http = http
         else:
             self.session = webuntis.Session(
                 username=self.settings.username,
@@ -55,8 +66,6 @@ class WebUntisClient:
                 login_repeat=0,
             )
 
-        # Important: do not prefetch students(). Some teacher accounts may read
-        # absence/class-register data but are not allowed to call getStudents().
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -68,21 +77,96 @@ class WebUntisClient:
             raise RuntimeError("WebUntis session is not initialized.")
         return self.session
 
+    def _http(self) -> requests.Session:
+        if self.http is not None:
+            return self.http
+        raise RuntimeError("Browser-style absence fetch currently requires app/QR authentication.")
+
     def current_schoolyear_dates(self) -> tuple[date, date]:
         current = self._s().schoolyears().current
         return current.start.date(), current.end.date()
 
-    def class_exists(self, class_name: str) -> bool:
-        """Best-effort validation only.
+    @staticmethod
+    def _yyyymmdd(value: date) -> int:
+        return value.year * 10000 + value.month * 100 + value.day
 
-        If the account has no permission for global class master data, skip this
-        check and continue with the absence payload itself.
+    @staticmethod
+    def _extract_csrf(page: str) -> str:
+        patterns = [
+            r'name=["\']_csrf["\'][^>]*value=["\']([^"\']+)',
+            r'value=["\']([^"\']+)["\'][^>]*name=["\']_csrf["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page, flags=re.IGNORECASE)
+            if match:
+                return html.unescape(match.group(1))
+        raise RuntimeError("Could not find WebUntis CSRF token on absencetimes.do page.")
+
+    def browser_absence_times_html(
+        self,
+        start: date,
+        end: date,
+        class_id: str,
+    ) -> str:
+        """Replay the teacher browser's absencetimes.do request.
+
+        This intentionally avoids getStudents(), which the teacher account is not
+        permitted to call, and instead requests the same rendered class-register
+        absence view that the WebUntis browser UI uses.
         """
-        try:
-            wanted = class_name.casefold()
-            return any(k.name.casefold() == wanted for k in self._s().klassen())
-        except webuntis.errors.Error:
-            return True
+        http_session = self._http()
+        base = f"https://{self.server}/WebUntis/absencetimes.do"
+        cache_buster = str(int(time.time() * 1000))
+
+        # First load the page so the authenticated session receives a fresh CSRF token.
+        page = http_session.get(
+            base,
+            params={"request.preventCache": cache_buster},
+            headers={"Accept": "text/html,application/xhtml+xml"},
+            timeout=30,
+        )
+        page.raise_for_status()
+        csrf = self._extract_csrf(page.text)
+
+        date_range = {
+            "name": "",
+            "id": -1,
+            "type": "CURRENT_SCHOOLYEAR",
+            "endDate": self._yyyymmdd(end),
+            "startDate": self._yyyymmdd(start),
+            "restrictToSchoolyear": True,
+        }
+
+        form = {
+            "request.preventCache": str(int(time.time() * 1000)),
+            "klasseOrStudentgroupId": class_id,
+            "studentId": "-1",
+            "subjectId": "-1",
+            "absenceReasonId": "-1",
+            "periodExcuseStatusId": "-1",
+            "selectedDateRange": json.dumps(date_range, separators=(",", ":")),
+            "withAbsences": "true",
+            "_withAbsences": "on",
+            "withLateness": "true",
+            "_withLateness": "on",
+            "_onlyExams": "on",
+            "_onlyOpen": "on",
+            "_csrf": csrf,
+        }
+
+        response = http_session.post(
+            base,
+            params={"request.preventCache": form["request.preventCache"]},
+            data=form,
+            headers={
+                "Accept": "text/html, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": page.url,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.text
 
     def absences(self, start: date, end: date):
         return self._s().timetable_with_absences(start=start, end=end)
