@@ -14,6 +14,7 @@ class Settings:
     username: str
     password: str
     qr_uri: str
+    app_secret: str
     useragent: str
     class_name: str
     start_date: date | None
@@ -33,28 +34,28 @@ def load_settings() -> Settings:
     load_dotenv()
 
     qr_uri = (os.getenv("WEBUNTIS_QR_URI") or "").strip()
+    app_secret = (os.getenv("WEBUNTIS_APP_SECRET") or "").strip()
     server = (os.getenv("WEBUNTIS_SERVER") or "").strip()
     school = (os.getenv("WEBUNTIS_SCHOOL") or "").strip()
     username = (os.getenv("WEBUNTIS_USERNAME") or "").strip()
     password = os.getenv("WEBUNTIS_PASSWORD") or ""
 
-    # QR authentication contains server/school/user itself. For the legacy
-    # fallback, all four classic values are required.
+    # QR URI contains server/school/user itself. A direct app secret needs the
+    # existing server/school/user values. Legacy login additionally needs password.
     if not qr_uri:
-        missing = [
-            key
-            for key, value in {
-                "WEBUNTIS_SERVER": server,
-                "WEBUNTIS_SCHOOL": school,
-                "WEBUNTIS_USERNAME": username,
-                "WEBUNTIS_PASSWORD": password,
-            }.items()
-            if not value
-        ]
+        required = {
+            "WEBUNTIS_SERVER": server,
+            "WEBUNTIS_SCHOOL": school,
+            "WEBUNTIS_USERNAME": username,
+        }
+        if not app_secret:
+            required["WEBUNTIS_PASSWORD"] = password
+
+        missing = [key for key, value in required.items() if not value]
         if missing:
             raise RuntimeError(
                 "Missing configuration: " + ", ".join(missing) +
-                ". Add WEBUNTIS_QR_URI or fill in the classic login values."
+                ". Add WEBUNTIS_APP_SECRET/WEBUNTIS_QR_URI or fill in the classic login values."
             )
 
     return Settings(
@@ -63,6 +64,7 @@ def load_settings() -> Settings:
         username=username,
         password=password,
         qr_uri=qr_uri,
+        app_secret=app_secret,
         useragent=os.getenv("WEBUNTIS_USERAGENT", "webuntis-absence-checker"),
         class_name=os.getenv("WEBUNTIS_CLASS", "SG8B"),
         start_date=_parse_date(os.getenv("START_DATE")),
