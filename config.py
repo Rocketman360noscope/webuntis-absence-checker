@@ -17,6 +17,7 @@ class Settings:
     app_secret: str
     useragent: str
     class_name: str
+    class_id: str
     start_date: date | None
     end_date: date | None
 
@@ -40,8 +41,6 @@ def load_settings() -> Settings:
     username = (os.getenv("WEBUNTIS_USERNAME") or "").strip()
     password = os.getenv("WEBUNTIS_PASSWORD") or ""
 
-    # QR URI contains server/school/user itself. A direct app secret needs the
-    # existing server/school/user values. Legacy login additionally needs password.
     if not qr_uri:
         required = {
             "WEBUNTIS_SERVER": server,
@@ -67,6 +66,7 @@ def load_settings() -> Settings:
         app_secret=app_secret,
         useragent=os.getenv("WEBUNTIS_USERAGENT", "webuntis-absence-checker"),
         class_name=os.getenv("WEBUNTIS_CLASS", "SG8B"),
+        class_id=os.getenv("WEBUNTIS_CLASS_ID", "KL4578"),
         start_date=_parse_date(os.getenv("START_DATE")),
         end_date=_parse_date(os.getenv("END_DATE")),
     )
