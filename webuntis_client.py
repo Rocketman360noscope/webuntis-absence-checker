@@ -6,7 +6,7 @@ from typing import Any
 import webuntis
 
 from config import Settings
-from qr_auth import otp_login
+from qr_auth import otp_login, otp_login_with_secret
 
 
 class WebUntisClient:
@@ -20,15 +20,16 @@ class WebUntisClient:
                 self.settings.qr_uri,
                 self.settings.useragent,
             )
-            self.session = webuntis.Session(
-                username=username,
-                password="",
-                server=server,
-                school=school,
-                useragent=self.settings.useragent,
-                jsessionid=jsessionid,
-                _http_session=http,
-                login_repeat=0,
+        elif self.settings.app_secret:
+            server = self.settings.server
+            school = self.settings.school
+            username = self.settings.username
+            jsessionid, http = otp_login_with_secret(
+                server,
+                school,
+                username,
+                self.settings.app_secret,
+                self.settings.useragent,
             )
         else:
             self.session = webuntis.Session(
@@ -40,6 +41,19 @@ class WebUntisClient:
                 login_repeat=1,
             )
             self.session.login()
+            server = school = username = jsessionid = http = None
+
+        if self.session is None:
+            self.session = webuntis.Session(
+                username=username,
+                password="",
+                server=server,
+                school=school,
+                useragent=self.settings.useragent,
+                jsessionid=jsessionid,
+                _http_session=http,
+                login_repeat=0,
+            )
 
         # Prime caches because AbsenceObject resolves students through them.
         self.session.students()
