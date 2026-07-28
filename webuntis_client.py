@@ -55,9 +55,8 @@ class WebUntisClient:
                 login_repeat=0,
             )
 
-        # Prime caches because AbsenceObject resolves students through them.
-        self.session.students()
-        self.session.klassen()
+        # Important: do not prefetch students(). Some teacher accounts may read
+        # absence/class-register data but are not allowed to call getStudents().
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -74,8 +73,16 @@ class WebUntisClient:
         return current.start.date(), current.end.date()
 
     def class_exists(self, class_name: str) -> bool:
-        wanted = class_name.casefold()
-        return any(k.name.casefold() == wanted for k in self._s().klassen(from_cache=True))
+        """Best-effort validation only.
+
+        If the account has no permission for global class master data, skip this
+        check and continue with the absence payload itself.
+        """
+        try:
+            wanted = class_name.casefold()
+            return any(k.name.casefold() == wanted for k in self._s().klassen())
+        except webuntis.errors.Error:
+            return True
 
     def absences(self, start: date, end: date):
         return self._s().timetable_with_absences(start=start, end=end)
