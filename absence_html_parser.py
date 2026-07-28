@@ -35,87 +35,63 @@ def _int(text: str) -> int:
 
 
 def _looks_like_date(value: str) -> bool:
-    return bool(re.search(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", value))
+    return bool(re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", _clean(value)))
+
+
+def _looks_like_time(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", _clean(value)))
 
 
 def parse_absence_rows(page: str) -> list[AbsenceRow]:
-    """Parse the rendered WebUntis absence list.
-
-    WebUntis does not always wrap the result rows in one conventional HTML
-    table. Therefore we scan every <tr> in the returned fragment and identify
-    actual absence rows by their data pattern (class + date + enough cells).
-    """
+    """Parse rendered WebUntis absence rows using the date cell as anchor."""
     soup = BeautifulSoup(page, "html.parser")
     rows: list[AbsenceRow] = []
 
     for tr in soup.find_all("tr"):
         cells = tr.find_all("td", recursive=False)
-        if len(cells) < 9:
+        if len(cells) < 12:
             continue
 
         texts = [_clean(td.get_text(" ", strip=True)) for td in cells]
-
-        # WebUntis usually starts result rows with a selection checkbox.
-        offset = 1 if cells and cells[0].find("input", attrs={"type": "checkbox"}) else 0
-        values = texts[offset:]
-        if len(values) < 9:
+        date_idx = next((i for i, value in enumerate(texts) if _looks_like_date(value)), None)
+        if date_idx is None or date_idx < 3:
             continue
 
-        # Expected beginning of a real row:
-        # student, class, date, time, subject, teacher, days, hours, minutes ...
-        student = values[0]
-        class_name = values[1] if len(values) > 1 else ""
-        date = values[2] if len(values) > 2 else ""
+        # Current WebUntis layout:
+        # selection | student | class | weekday | date | time | subject |
+        # teacher | absent days | absent hours | absent minutes | counts |
+        # absence reason | status | optional note
+        student_idx = date_idx - 3
+        class_idx = date_idx - 2
 
-        # Skip filter/form/header rows and unrelated layout tables.
-        if not student or not _looks_like_date(date):
+        student = texts[student_idx]
+        class_name = texts[class_idx]
+        time_value = texts[date_idx + 1] if date_idx + 1 < len(texts) else ""
+
+        if not student or not class_name or not _looks_like_time(time_value):
             continue
-        if not class_name:
-            continue
 
-        time_value = values[3] if len(values) > 3 else ""
-        subject = values[4] if len(values) > 4 else ""
-        teacher = values[5] if len(values) > 5 else ""
-        absent_days = _int(values[6]) if len(values) > 6 else 0
-        absent_hours = _int(values[7]) if len(values) > 7 else 0
-        absent_minutes = _int(values[8]) if len(values) > 8 else 0
+        subject = texts[date_idx + 2] if date_idx + 2 < len(texts) else ""
+        teacher = texts[date_idx + 3] if date_idx + 3 < len(texts) else ""
+        absent_days = _int(texts[date_idx + 4]) if date_idx + 4 < len(texts) else 0
+        absent_hours = _int(texts[date_idx + 5]) if date_idx + 5 < len(texts) else 0
+        absent_minutes = _int(texts[date_idx + 6]) if date_idx + 6 < len(texts) else 0
 
+        counts_idx = date_idx + 7
         counts = False
-        reason = ""
-        status = ""
-
-        # After the numeric columns there is typically a checkbox for "zählt",
-        # followed by absence reason and status. Locate it structurally rather
-        # than relying on an exact column number.
-        checkbox_cell_index = None
-        for absolute_idx, cell in enumerate(cells[offset + 9 :], start=offset + 9):
-            checkbox = cell.find("input", attrs={"type": "checkbox"})
+        if counts_idx < len(cells):
+            checkbox = cells[counts_idx].find("input", attrs={"type": "checkbox"})
             if checkbox is not None:
-                checkbox_cell_index = absolute_idx
                 counts = checkbox.has_attr("checked")
-                break
 
-        if checkbox_cell_index is not None:
-            tail = texts[checkbox_cell_index + 1 :]
-        else:
-            tail = values[9:]
-
-        tail = [item for item in tail if item]
-        if tail:
-            reason = tail[0]
-        if len(tail) > 1:
-            status = tail[-1]
-        elif tail and tail[0].casefold() in {
-            "offen", "entschuldigt", "unentschuldigt", "verspätet"
-        }:
-            status = tail[0]
-            reason = ""
+        reason = texts[date_idx + 8] if date_idx + 8 < len(texts) else ""
+        status = texts[date_idx + 9] if date_idx + 9 < len(texts) else ""
 
         rows.append(
             AbsenceRow(
                 student=student,
                 class_name=class_name,
-                date=date,
+                date=texts[date_idx],
                 time=time_value,
                 subject=subject,
                 teacher=teacher,
@@ -159,6 +135,7 @@ def write_summary_csv(rows: list[AbsenceRow], path: Path) -> None:
         "days": 0,
         "hours": 0,
         "minutes": 0,
+        "late_entries": 0,
         "excused_entries": 0,
         "unexcused_entries": 0,
         "open_entries": 0,
@@ -170,8 +147,12 @@ def write_summary_csv(rows: list[AbsenceRow], path: Path) -> None:
         item["days"] += row.absent_days
         item["hours"] += row.absent_hours
         item["minutes"] += row.absent_minutes
+
+        if "verspät" in row.reason.casefold():
+            item["late_entries"] += 1
+
         status = row.status.casefold()
-        if "unentsch" in status:
+        if "unentsch" in status or "nicht entsch" in status:
             item["unexcused_entries"] += 1
         elif "entsch" in status:
             item["excused_entries"] += 1
@@ -183,11 +164,11 @@ def write_summary_csv(rows: list[AbsenceRow], path: Path) -> None:
         writer = csv.writer(handle, delimiter=";")
         writer.writerow([
             "Schüler*in", "Einträge", "Fehltage", "Fehlstunden", "Fehlminuten",
-            "Entschuldigte Einträge", "Unentschuldigte Einträge", "Offene/unklare Einträge"
+            "Verspätungs-Einträge", "Entschuldigte Einträge", "Unentschuldigte Einträge", "Offene/unklare Einträge"
         ])
         for student in sorted(summary, key=str.casefold):
             item = summary[student]
             writer.writerow([
                 student, item["entries"], item["days"], item["hours"], item["minutes"],
-                item["excused_entries"], item["unexcused_entries"], item["open_entries"],
+                item["late_entries"], item["excused_entries"], item["unexcused_entries"], item["open_entries"],
             ])
