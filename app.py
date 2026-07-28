@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from pprint import pprint
 import sys
 
 import webuntis
@@ -36,6 +37,19 @@ def main() -> int:
 
             print(f"Fetching WebUntis absences from {start} to {end} …")
             absences = client.absences(start, end)
+
+            # Diagnostic: show exactly one raw absence record without triggering
+            # convenience properties such as absence.name, which may call getStudents().
+            try:
+                first = next(iter(absences))
+            except StopIteration:
+                first = None
+
+            if first is not None:
+                print("\n=== FIRST RAW ABSENCE (DIAGNOSTIC) ===")
+                pprint(getattr(first, "_data", {}), sort_dicts=True)
+                print("=== END RAW ABSENCE ===\n")
+
             rows, saw_class_metadata = aggregate_absences(absences, settings.class_name)
 
             if not saw_class_metadata:
