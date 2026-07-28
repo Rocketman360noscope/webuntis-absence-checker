@@ -44,7 +44,12 @@ def otp_login_with_secret(
     secret: str,
     useragent: str,
 ) -> tuple[str, requests.Session]:
-    """Login using WebUntis app credentials and return JSESSIONID + HTTP session."""
+    """Login using WebUntis app credentials and return JSESSIONID + HTTP session.
+
+    The getUserData2017 result is retained on the requests session as
+    ``webuntis_user_data``. This response can contain master data that lets us
+    resolve element IDs without calling the legacy getStudents() method.
+    """
     otp = pyotp.TOTP(secret.replace(" ", "")).now()
     client_time = int(time.time() * 1000)
 
@@ -88,6 +93,10 @@ def otp_login_with_secret(
     if payload.get("error"):
         message = payload["error"].get("message", "unknown error")
         raise QRLoginError(f"App login failed: {message}")
+
+    # Keep the already-returned user/master data. requests.Session permits custom
+    # attributes, and this avoids making another authenticated request.
+    http.webuntis_user_data = payload.get("result")  # type: ignore[attr-defined]
 
     jsessionid = http.cookies.get("JSESSIONID")
     if not jsessionid:
