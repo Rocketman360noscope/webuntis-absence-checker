@@ -32,6 +32,11 @@ debug/
 *.csv
 *.json
 curl.txt
+browser_response.html
+absencetimes.do
+direct.html
+fresh_direct.html
+replay.cmd
 
 # IDE / OS
 .vscode/
