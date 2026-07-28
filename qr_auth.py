@@ -37,13 +37,15 @@ def parse_qr_uri(qr_uri: str) -> tuple[str, str, str, str]:
     return server, school, username, secret
 
 
-def otp_login(qr_uri: str, useragent: str) -> tuple[str, str, str, str, requests.Session]:
-    """Login using the same TOTP-based flow used by WebUntis QR/App credentials.
-
-    Returns server, school, username, JSESSIONID and the HTTP session.
-    """
-    server, school, username, secret = parse_qr_uri(qr_uri)
-    otp = pyotp.TOTP(secret).now()
+def otp_login_with_secret(
+    server: str,
+    school: str,
+    username: str,
+    secret: str,
+    useragent: str,
+) -> tuple[str, requests.Session]:
+    """Login using WebUntis app credentials and return JSESSIONID + HTTP session."""
+    otp = pyotp.TOTP(secret.replace(" ", "")).now()
     client_time = int(time.time() * 1000)
 
     http = requests.Session()
@@ -81,14 +83,21 @@ def otp_login(qr_uri: str, useragent: str) -> tuple[str, str, str, str, requests
     try:
         payload = response.json()
     except ValueError as exc:
-        raise QRLoginError("WebUntis returned an invalid response during QR login.") from exc
+        raise QRLoginError("WebUntis returned an invalid response during app login.") from exc
 
     if payload.get("error"):
         message = payload["error"].get("message", "unknown error")
-        raise QRLoginError(f"QR login failed: {message}")
+        raise QRLoginError(f"App login failed: {message}")
 
     jsessionid = http.cookies.get("JSESSIONID")
     if not jsessionid:
-        raise QRLoginError("QR login did not return a JSESSIONID.")
+        raise QRLoginError("App login did not return a JSESSIONID.")
 
+    return jsessionid, http
+
+
+def otp_login(qr_uri: str, useragent: str) -> tuple[str, str, str, str, requests.Session]:
+    """Login from the complete WebUntis QR URI."""
+    server, school, username, secret = parse_qr_uri(qr_uri)
+    jsessionid, http = otp_login_with_secret(server, school, username, secret, useragent)
     return server, school, username, jsessionid, http
