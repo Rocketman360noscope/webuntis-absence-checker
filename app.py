@@ -13,8 +13,23 @@ def main() -> int:
         status, page = replay_browser_request(curl_path)
 
         print(f"HTTP status: {status}")
-        if status != 200:
+
+        # Some Firefox/cmd cURL captures do not preserve our added status marker,
+        # but the original request can still return the complete HTML successfully.
+        # Therefore validate the response content before treating status=0 as failure.
+        markers = {
+            "SG8B": "SG8B" in page,
+            "Fehlstunden": "Fehlstunden" in page,
+            "Schüler*innen": "Schüler*innen" in page or "Schüler" in page,
+        }
+        looks_like_absence_page = all(markers.values())
+
+        if status not in (0, 200) and not looks_like_absence_page:
             print("Browser replay failed. The captured WebUntis session may have expired.", file=sys.stderr)
+            return 4
+
+        if not page.strip():
+            print("Browser replay returned no HTML.", file=sys.stderr)
             return 4
 
         output_dir = Path("reports")
@@ -24,17 +39,11 @@ def main() -> int:
 
         print(f"Saved response: {output}")
         print(f"Response size: {len(page):,} characters")
-
-        markers = {
-            "SG8B": "SG8B" in page,
-            "Fehlstunden": "Fehlstunden" in page,
-            "Schüler*innen": "Schüler*innen" in page or "Schüler" in page,
-        }
         print("Checks:")
         for name, present in markers.items():
             print(f"  {name}: {'YES' if present else 'NO'}")
 
-        if all(markers.values()):
+        if looks_like_absence_page:
             print("\nSUCCESS: The browser-only absence page can be replayed from Python.")
         else:
             print("\nThe request returned HTML, but it may not be the expected absence table.")
