@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from pprint import pprint
+import re
 import sys
 
 import webuntis
 
-from absence_report import aggregate_absences, write_csv
 from config import load_settings
 from webuntis_client import WebUntisClient
+
+
+def _html_to_text(value: str) -> str:
+    value = re.sub(r"<script\b[^>]*>.*?</script>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    value = re.sub(r"<style\b[^>]*>.*?</style>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
 def main() -> int:
@@ -28,70 +35,31 @@ def main() -> int:
             if start > end:
                 raise ValueError(f"Start date {start} is after end date {end}.")
 
-            if not client.class_exists(settings.class_name):
-                print(
-                    f"Warning: class '{settings.class_name}' was not found in the class list. "
-                    "The absence payload will still be checked.",
-                    file=sys.stderr,
-                )
+            print(
+                f"Fetching browser-style WebUntis absence page for {settings.class_name} "
+                f"from {start} to {end} …"
+            )
+            page = client.browser_absence_times_html(start, end, settings.class_id)
 
-            print(f"Fetching WebUntis absences from {start} to {end} …")
-            absences = client.absences(start, end)
+            output_dir = Path("reports")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / f"{settings.class_name}_{start}_{end}_browser.html"
+            output.write_text(page, encoding="utf-8")
 
-            # Diagnostic: show exactly one raw absence record without triggering
-            # convenience properties such as absence.name, which may call getStudents().
-            try:
-                first = next(iter(absences))
-            except StopIteration:
-                first = None
-
-            if first is not None:
-                print("\n=== FIRST RAW ABSENCE (DIAGNOSTIC) ===")
-                pprint(getattr(first, "_data", {}), sort_dicts=True)
-                print("=== END RAW ABSENCE ===\n")
-
-            rows, saw_class_metadata = aggregate_absences(absences, settings.class_name)
-
-            if not saw_class_metadata:
-                print(
-                    "WARNING: This WebUntis server did not expose class/group metadata in the "
-                    "absence payload. The result may contain every absence visible to this account. "
-                    "Check the CSV before relying on it.",
-                    file=sys.stderr,
-                )
-
-            output = Path("reports") / f"{settings.class_name}_{start}_{end}.csv"
-            write_csv(rows, output)
-
+            text = _html_to_text(page)
             print()
-            print(f"Class:  {settings.class_name}")
-            print(f"Period: {start} – {end}")
-            print(f"Students with absence entries: {len(rows)}")
-            print(f"Report: {output}")
+            print("Browser request succeeded.")
+            print(f"Saved response: {output}")
+            print(f"Response size: {len(page):,} characters")
             print()
-
-            if rows:
-                print(f"{'Name':32} {'exc.':>7} {'unexc.':>8} {'unclear':>8} {'total':>8}")
-                print("-" * 70)
-                for row in rows:
-                    print(
-                        f"{row.name[:32]:32} "
-                        f"{row.excused_minutes:7} "
-                        f"{row.unexcused_minutes:8} "
-                        f"{row.unknown_minutes:8} "
-                        f"{row.total_minutes:8}"
-                    )
-            else:
-                print("No matching absence entries found.")
+            print("=== RESPONSE PREVIEW ===")
+            print(text[:1800])
+            print("=== END PREVIEW ===")
 
         return 0
 
     except webuntis.errors.BadCredentialsError:
-        print(
-            "Login failed. Username/password authentication was rejected by WebUntis. "
-            "If your school requires 2FA/SSO, the next step is App/QR authentication.",
-            file=sys.stderr,
-        )
+        print("Login failed.", file=sys.stderr)
         return 3
     except webuntis.errors.Error as exc:
         print(f"WebUntis error: {exc}", file=sys.stderr)
