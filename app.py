@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+from absence_html_parser import parse_absence_rows, write_detail_csv, write_summary_csv
 from browser_replay import BrowserReplayError, replay_browser_request
 
 
@@ -13,40 +14,52 @@ def main() -> int:
         status, page = replay_browser_request(curl_path)
 
         print(f"HTTP status: {status}")
+        if status not in (0, 200):
+            print("Browser replay failed. The captured WebUntis session may have expired.", file=sys.stderr)
+            return 4
 
-        # Some Firefox/cmd cURL captures do not preserve our added status marker,
-        # but the original request can still return the complete HTML successfully.
-        # Therefore validate the response content before treating status=0 as failure.
         markers = {
             "SG8B": "SG8B" in page,
             "Fehlstunden": "Fehlstunden" in page,
             "Schüler*innen": "Schüler*innen" in page or "Schüler" in page,
         }
-        looks_like_absence_page = all(markers.values())
-
-        if status not in (0, 200) and not looks_like_absence_page:
-            print("Browser replay failed. The captured WebUntis session may have expired.", file=sys.stderr)
-            return 4
-
-        if not page.strip():
-            print("Browser replay returned no HTML.", file=sys.stderr)
-            return 4
-
-        output_dir = Path("reports")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output = output_dir / "browser_replay.html"
-        output.write_text(page, encoding="utf-8")
-
-        print(f"Saved response: {output}")
-        print(f"Response size: {len(page):,} characters")
         print("Checks:")
         for name, present in markers.items():
             print(f"  {name}: {'YES' if present else 'NO'}")
 
-        if looks_like_absence_page:
-            print("\nSUCCESS: The browser-only absence page can be replayed from Python.")
+        if not all(markers.values()):
+            print("The request returned HTML, but it does not look like the expected absence page.", file=sys.stderr)
+            return 5
+
+        output_dir = Path("reports")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        html_output = output_dir / "browser_replay.html"
+        html_output.write_text(page, encoding="utf-8")
+
+        rows = parse_absence_rows(page)
+        detail_output = output_dir / "SG8B_absences_detail.csv"
+        summary_output = output_dir / "SG8B_absences_summary.csv"
+        write_detail_csv(rows, detail_output)
+        write_summary_csv(rows, summary_output)
+
+        print()
+        print("SUCCESS: WebUntis absence page parsed.")
+        print(f"Parsed absence rows: {len(rows)}")
+        print(f"Detail CSV:  {detail_output}")
+        print(f"Summary CSV: {summary_output}")
+
+        if rows:
+            first = rows[0]
+            print()
+            print("First parsed row:")
+            print(f"  Student: {first.student}")
+            print(f"  Class:   {first.class_name}")
+            print(f"  Date:    {first.date}")
+            print(f"  Time:    {first.time}")
+            print(f"  Subject: {first.subject}")
+            print(f"  Status:  {first.status or '(empty)'}")
         else:
-            print("\nThe request returned HTML, but it may not be the expected absence table.")
+            print("WARNING: No absence table rows were parsed.", file=sys.stderr)
 
         return 0
 
