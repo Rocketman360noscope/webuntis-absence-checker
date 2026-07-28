@@ -34,42 +34,45 @@ def _int(text: str) -> int:
     return int(match.group(0)) if match else 0
 
 
+def _looks_like_date(value: str) -> bool:
+    return bool(re.search(r"\b\d{1,2}\.\d{1,2}\.\d{4}\b", value))
+
+
 def parse_absence_rows(page: str) -> list[AbsenceRow]:
+    """Parse the rendered WebUntis absence list.
+
+    WebUntis does not always wrap the result rows in one conventional HTML
+    table. Therefore we scan every <tr> in the returned fragment and identify
+    actual absence rows by their data pattern (class + date + enough cells).
+    """
     soup = BeautifulSoup(page, "html.parser")
-
-    target = None
-    for table in soup.find_all("table"):
-        header = _clean(table.get_text(" ", strip=True)).casefold()
-        if "fehlstd" in header and "fehlmin" in header and "schüler" in header:
-            target = table
-            break
-
-    if target is None:
-        raise RuntimeError("Could not find the WebUntis absence table in the HTML response.")
-
     rows: list[AbsenceRow] = []
-    for tr in target.find_all("tr"):
+
+    for tr in soup.find_all("tr"):
         cells = tr.find_all("td", recursive=False)
-        if len(cells) < 10:
+        if len(cells) < 9:
             continue
 
         texts = [_clean(td.get_text(" ", strip=True)) for td in cells]
 
-        # WebUntis currently renders an initial selection-checkbox column.
-        # The expected data order after that is:
-        # student, class, date, time, subject, teacher, absent days, hours,
-        # minutes, counts, reason, status.
-        offset = 1 if cells[0].find("input") is not None else 0
+        # WebUntis usually starts result rows with a selection checkbox.
+        offset = 1 if cells and cells[0].find("input", attrs={"type": "checkbox"}) else 0
         values = texts[offset:]
         if len(values) < 9:
             continue
 
+        # Expected beginning of a real row:
+        # student, class, date, time, subject, teacher, days, hours, minutes ...
         student = values[0]
-        if not student or student.casefold() in {"schüler*innen", "schüler"}:
-            continue
-
         class_name = values[1] if len(values) > 1 else ""
         date = values[2] if len(values) > 2 else ""
+
+        # Skip filter/form/header rows and unrelated layout tables.
+        if not student or not _looks_like_date(date):
+            continue
+        if not class_name:
+            continue
+
         time_value = values[3] if len(values) > 3 else ""
         subject = values[4] if len(values) > 4 else ""
         teacher = values[5] if len(values) > 5 else ""
@@ -81,27 +84,32 @@ def parse_absence_rows(page: str) -> list[AbsenceRow]:
         reason = ""
         status = ""
 
-        # Prefer locating the "counts" checkbox structurally, then use the
-        # remaining textual tail for reason/status. This is more robust across
-        # slightly different WebUntis layouts.
-        counts_index = None
-        for idx, cell in enumerate(cells[offset + 9 :], start=9):
+        # After the numeric columns there is typically a checkbox for "zählt",
+        # followed by absence reason and status. Locate it structurally rather
+        # than relying on an exact column number.
+        checkbox_cell_index = None
+        for absolute_idx, cell in enumerate(cells[offset + 9 :], start=offset + 9):
             checkbox = cell.find("input", attrs={"type": "checkbox"})
             if checkbox is not None:
-                counts_index = idx
+                checkbox_cell_index = absolute_idx
                 counts = checkbox.has_attr("checked")
                 break
 
-        if counts_index is not None:
-            tail_start = counts_index + 1
-            tail = texts[offset + tail_start :]
+        if checkbox_cell_index is not None:
+            tail = texts[checkbox_cell_index + 1 :]
         else:
             tail = values[9:]
 
+        tail = [item for item in tail if item]
         if tail:
             reason = tail[0]
         if len(tail) > 1:
             status = tail[-1]
+        elif tail and tail[0].casefold() in {
+            "offen", "entschuldigt", "unentschuldigt", "verspätet"
+        }:
+            status = tail[0]
+            reason = ""
 
         rows.append(
             AbsenceRow(
@@ -118,6 +126,11 @@ def parse_absence_rows(page: str) -> list[AbsenceRow]:
                 reason=reason,
                 status=status,
             )
+        )
+
+    if not rows:
+        raise RuntimeError(
+            "The WebUntis page was received, but no absence rows could be recognized."
         )
 
     return rows
