@@ -33,20 +33,13 @@ def _status_bucket(status: object) -> str:
 
 
 def _matches_class(absence: object, class_name: str) -> bool:
-    """Best-effort class filter.
-
-    WebUntis installations expose slightly different absence payloads. The
-    python-webuntis wrapper reliably exposes studentGroup, while some servers
-    also include class data in the raw payload. We inspect both.
-    """
+    """Best-effort class filter without triggering any additional API calls."""
     wanted = class_name.casefold()
     raw = getattr(absence, "_data", {}) or {}
 
     candidates: list[str] = []
-    group = getattr(absence, "student_group", "")
-    if group:
-        candidates.append(str(group))
-
+    # Read raw fields only. Accessing some convenience properties in
+    # python-webuntis may cause follow-up API requests.
     for key in ("className", "klasseName", "class", "klasse", "studentGroup"):
         value = raw.get(key)
         if isinstance(value, str):
@@ -54,12 +47,36 @@ def _matches_class(absence: object, class_name: str) -> bool:
         elif isinstance(value, dict):
             candidates.extend(str(v) for v in value.values() if isinstance(v, str))
 
-    # If the server gives no class/group field at all, return True. Many teacher
-    # accounts are already permission-scoped; the CLI warns about this fallback.
     if not candidates:
         return True
 
     return any(wanted in candidate.casefold() for candidate in candidates)
+
+
+def _raw_student_name(raw: dict) -> str:
+    """Resolve a display name exclusively from the absence payload.
+
+    Never use AbsenceObject.name/student here: those properties call
+    getStudents(), which many teacher accounts are not allowed to use.
+    """
+    for key in ("studentName", "student", "name", "studentLongName", "longName"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            first = value.get("foreName") or value.get("firstName") or ""
+            last = value.get("longName") or value.get("lastName") or value.get("name") or ""
+            combined = f"{first} {last}".strip()
+            if combined:
+                return combined
+
+    # Keep entries separated even if this WebUntis server only supplies a
+    # student key/id in the absence payload.
+    student_id = raw.get("studentId") or raw.get("studentid") or raw.get("studentKey")
+    if student_id not in (None, ""):
+        return f"Schüler-ID {student_id}"
+
+    return "Unbekannter Schüler"
 
 
 def aggregate_absences(absences: object, class_name: str) -> tuple[list[StudentSummary], bool]:
@@ -68,22 +85,23 @@ def aggregate_absences(absences: object, class_name: str) -> tuple[list[StudentS
 
     for absence in absences:
         raw = getattr(absence, "_data", {}) or {}
-        group = getattr(absence, "student_group", "")
-        if group or any(k in raw for k in ("className", "klasseName", "class", "klasse", "studentGroup")):
+        if any(k in raw for k in ("className", "klasseName", "class", "klasse", "studentGroup")):
             saw_class_metadata = True
 
         if not _matches_class(absence, class_name):
             continue
 
-        try:
-            name = absence.name.strip()
-        except Exception:
-            name = str(raw.get("studentName") or raw.get("name") or "Unknown student")
-
+        name = _raw_student_name(raw)
         summary = summaries[name]
         summary.name = name
-        minutes = max(int(getattr(absence, "time", 0) or 0), 0)
-        bucket = _status_bucket(getattr(absence, "status", ""))
+
+        # Read the payload directly so no lazy WebUntis properties can trigger
+        # forbidden follow-up requests.
+        try:
+            minutes = max(int(raw.get("absentTime", 0) or 0), 0)
+        except (TypeError, ValueError):
+            minutes = 0
+        bucket = _status_bucket(raw.get("excuseStatus", ""))
 
         if bucket == "excused":
             summary.excused_minutes += minutes
