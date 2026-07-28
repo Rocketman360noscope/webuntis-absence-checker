@@ -9,9 +9,15 @@ from browser_replay import BrowserReplayError, replay_browser_request
 
 def main() -> int:
     try:
-        curl_path = Path("curl.txt")
-        print("Replaying the working Firefox WebUntis absence request from local curl.txt …")
-        status, page = replay_browser_request(curl_path)
+        saved_response = Path("browser_response.html")
+        if saved_response.exists():
+            print("Using saved browser_response.html for parsing test …")
+            page = saved_response.read_text(encoding="utf-8", errors="replace")
+            status = 200
+        else:
+            curl_path = Path("curl.txt")
+            print("Replaying the working Firefox WebUntis absence request from local curl.txt …")
+            status, page = replay_browser_request(curl_path)
 
         print(f"HTTP status: {status}")
         if status not in (0, 200):
@@ -28,13 +34,11 @@ def main() -> int:
             print(f"  {name}: {'YES' if present else 'NO'}")
 
         if not all(markers.values()):
-            print("The request returned HTML, but it does not look like the expected absence page.", file=sys.stderr)
+            print("The response does not look like the expected absence page.", file=sys.stderr)
             return 5
 
         output_dir = Path("reports")
         output_dir.mkdir(parents=True, exist_ok=True)
-        html_output = output_dir / "browser_replay.html"
-        html_output.write_text(page, encoding="utf-8")
 
         rows = parse_absence_rows(page)
         detail_output = output_dir / "SG8B_absences_detail.csv"
@@ -57,9 +61,8 @@ def main() -> int:
             print(f"  Date:    {first.date}")
             print(f"  Time:    {first.time}")
             print(f"  Subject: {first.subject}")
+            print(f"  Reason:  {first.reason or '(empty)'}")
             print(f"  Status:  {first.status or '(empty)'}")
-        else:
-            print("WARNING: No absence table rows were parsed.", file=sys.stderr)
 
         return 0
 
