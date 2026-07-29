@@ -15,6 +15,7 @@ class Settings:
     password: str
     qr_uri: str
     app_secret: str
+    totp_secret: str
     useragent: str
     class_name: str
     class_id: str
@@ -36,6 +37,7 @@ def load_settings() -> Settings:
 
     qr_uri = (os.getenv("WEBUNTIS_QR_URI") or "").strip()
     app_secret = (os.getenv("WEBUNTIS_APP_SECRET") or "").strip()
+    totp_secret = (os.getenv("WEBUNTIS_TOTP_SECRET") or "").strip()
     server = (os.getenv("WEBUNTIS_SERVER") or "").strip()
     school = (os.getenv("WEBUNTIS_SCHOOL") or "").strip()
     username = (os.getenv("WEBUNTIS_USERNAME") or "").strip()
@@ -64,6 +66,7 @@ def load_settings() -> Settings:
         password=password,
         qr_uri=qr_uri,
         app_secret=app_secret,
+        totp_secret=totp_secret,
         useragent=os.getenv("WEBUNTIS_USERAGENT", "webuntis-absence-checker"),
         class_name=os.getenv("WEBUNTIS_CLASS", "SG8B"),
         class_id=os.getenv("WEBUNTIS_CLASS_ID", "KL4578"),
