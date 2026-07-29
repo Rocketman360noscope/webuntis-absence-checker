@@ -9,6 +9,7 @@ import pyotp
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from config import Settings
+from qr_auth import parse_qr_uri
 
 
 class BrowserAutomationError(RuntimeError):
@@ -72,6 +73,86 @@ def _safe_form_description(page: Page) -> str:
     return "; ".join(items) or "no visible inputs"
 
 
+def _visible_error_text(page: Page) -> str:
+    selectors = [
+        '[role="alert"]',
+        '.error',
+        '.alert',
+        '[class*="error" i]',
+        '[class*="alert" i]',
+        '.MuiFormHelperText-root',
+    ]
+    messages: list[str] = []
+    for selector in selectors:
+        locator = page.locator(selector)
+        for i in range(min(locator.count(), 20)):
+            item = locator.nth(i)
+            try:
+                if not item.is_visible():
+                    continue
+                text = re.sub(r"\s+", " ", item.inner_text()).strip()
+                if text and text not in messages:
+                    messages.append(text)
+            except Exception:
+                continue
+    return " | ".join(messages[:5])
+
+
+def _password_is_visible(page: Page) -> bool:
+    field = _first_visible(page, ['input[autocomplete="current-password"]', 'input[type="password"]'])
+    return field is not None
+
+
+def _semantic_otp_input(page: Page):
+    return _first_visible(
+        page,
+        [
+            'input[autocomplete="one-time-code"]',
+            'input[name*="otp" i]',
+            'input[name*="totp" i]',
+            'input[name*="token" i]',
+            'input[name*="code" i]',
+            'input[type="tel"]',
+            'input[type="number"]',
+        ],
+    )
+
+
+def _fallback_otp_input(page: Page):
+    # Only call this after the password field has disappeared. Otherwise the one
+    # remaining text field is usually still the username field on a failed login.
+    visible_text_inputs = []
+    locator = page.locator('input[type="text"], input:not([type])')
+    for i in range(locator.count()):
+        el = locator.nth(i)
+        try:
+            if el.is_visible():
+                visible_text_inputs.append(el)
+        except Exception:
+            pass
+    return visible_text_inputs[0] if len(visible_text_inputs) == 1 else None
+
+
+def _otp_secret(settings: Settings) -> str:
+    if settings.app_secret:
+        return settings.app_secret.replace(" ", "")
+    if settings.qr_uri:
+        _server, _school, _username, secret = parse_qr_uri(settings.qr_uri)
+        return secret.replace(" ", "")
+    raise BrowserAutomationError(
+        "A 2FA field appeared, but neither WEBUNTIS_APP_SECRET nor WEBUNTIS_QR_URI contains a secret."
+    )
+
+
+def _fresh_otp(secret: str) -> str:
+    totp = pyotp.TOTP(secret)
+    remaining = totp.interval - (time.time() % totp.interval)
+    # Do not submit a code that is about to expire while the browser is clicking.
+    if remaining < 8:
+        time.sleep(remaining + 0.7)
+    return totp.now()
+
+
 def _login(page: Page, settings: Settings) -> None:
     if not settings.password:
         raise BrowserAutomationError(
@@ -101,49 +182,65 @@ def _login(page: Page, settings: Settings) -> None:
     username.fill(settings.username)
     password.fill(settings.password)
     _click_submit(page)
-    page.wait_for_timeout(1800)
 
-    # A 2FA field may appear after the password step. Prefer semantic selectors,
-    # then fall back to a single visible short text/tel/number input.
-    otp_input = _first_visible(
-        page,
-        [
-            'input[autocomplete="one-time-code"]',
-            'input[name*="otp" i]',
-            'input[name*="totp" i]',
-            'input[name*="token" i]',
-            'input[name*="code" i]',
-            'input[type="tel"]',
-            'input[type="number"]',
-        ],
-    )
+    # Wait for either a genuine 2FA step or for the password form to disappear.
+    otp_input = None
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        page.wait_for_timeout(250)
+        otp_input = _semantic_otp_input(page)
+        if otp_input is not None:
+            break
+        if not _password_is_visible(page):
+            break
+
+    if _password_is_visible(page):
+        error = _visible_error_text(page)
+        suffix = f" Visible error: {error}" if error else ""
+        raise BrowserAutomationError(
+            "Password login did not advance; the username/password form is still visible. "
+            "Check WEBUNTIS_USERNAME and WEBUNTIS_PASSWORD in .env." + suffix
+        )
 
     if otp_input is None:
-        # Some WebUntis versions use an ordinary text field without a useful name.
-        visible_text_inputs = []
-        for i in range(page.locator('input[type="text"], input:not([type])').count()):
-            el = page.locator('input[type="text"], input:not([type])').nth(i)
-            try:
-                if el.is_visible():
-                    visible_text_inputs.append(el)
-            except Exception:
-                pass
-        if len(visible_text_inputs) == 1:
-            otp_input = visible_text_inputs[0]
+        otp_input = _fallback_otp_input(page)
 
     if otp_input is not None:
-        if not settings.app_secret:
-            raise BrowserAutomationError(
-                "A 2FA field appeared, but WEBUNTIS_APP_SECRET is empty."
-            )
-        otp = pyotp.TOTP(settings.app_secret.replace(" ", "")).now()
-        otp_input.fill(otp)
-        _click_submit(page)
-        page.wait_for_timeout(2200)
+        secret = _otp_secret(settings)
 
-    # We intentionally do not require a particular dashboard selector because
-    # WebUntis installations can differ. The protected absence page below is
-    # the definitive login check.
+        # Retry once with a fresh time window if WebUntis rejects the first code.
+        for attempt in range(2):
+            otp = _fresh_otp(secret)
+            otp_input.fill(otp)
+            _click_submit(page)
+
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                page.wait_for_timeout(250)
+                current_otp = _semantic_otp_input(page)
+                if current_otp is None and not _password_is_visible(page):
+                    page.wait_for_timeout(1200)
+                    return
+
+            if attempt == 0:
+                # Wait for the next TOTP window before the one permitted retry.
+                totp = pyotp.TOTP(secret)
+                remaining = totp.interval - (time.time() % totp.interval)
+                time.sleep(remaining + 0.7)
+                otp_input = _semantic_otp_input(page) or _fallback_otp_input(page)
+                if otp_input is None:
+                    break
+
+        error = _visible_error_text(page)
+        suffix = f" Visible error: {error}" if error else ""
+        raise BrowserAutomationError(
+            "The WebUntis 2FA code was rejected twice. Check that WEBUNTIS_APP_SECRET belongs to this account "
+            "and that the Windows clock is set automatically." + suffix
+        )
+
+    # No OTP field appeared. If the login form has gone, the account may have
+    # trusted this browser or completed login without a second step.
+    page.wait_for_timeout(1200)
 
 
 def _submit_absence_filter(
@@ -152,7 +249,6 @@ def _submit_absence_filter(
     start: date,
     end: date,
 ) -> str:
-    # Establish the same embedded/teacher context used by WebUntis itself.
     embedded = f"https://{settings.server}/WebUntis/embedded.do?showSidebar=true"
     page.goto(embedded, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(1000)
@@ -182,7 +278,6 @@ def _submit_absence_filter(
         "restrictToSchoolyear": True,
     }
 
-    # Set all known filter values without triggering onchange yet.
     page.evaluate(
         """
         ([classId, dateRange]) => {
@@ -215,8 +310,6 @@ def _submit_absence_filter(
             lambda r: "absencetimes.do" in r.url and r.request.method == "POST",
             timeout=30_000,
         ) as response_info:
-            # Use WebUntis' own JavaScript submit routine. It attaches the browser's
-            # CSRF/session headers, which plain requests could not reproduce.
             page.evaluate(
                 """
                 () => {
@@ -239,7 +332,7 @@ def _submit_absence_filter(
 
     if result.status != 200:
         raise BrowserAutomationError(f"Absence POST returned HTTP {result.status}.")
-    if "SG8B" not in body and settings.class_name not in body:
+    if settings.class_name not in body:
         raise BrowserAutomationError("Absence POST returned HTML, but the configured class was not found.")
 
     return body
