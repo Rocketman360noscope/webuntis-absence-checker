@@ -8,7 +8,8 @@ import sys
 from bs4 import BeautifulSoup
 
 from absence_html_parser import parse_absence_rows, write_detail_csv, write_summary_csv
-from browser_automation import BrowserAutomationError, fetch_absence_html_browser
+from browser_automation import BrowserAutomationError
+from browser_automation_v2 import fetch_absence_html_browser_v2
 from config import load_settings
 
 
@@ -38,6 +39,7 @@ def _print_safe_diagnostics(page: str) -> None:
     print(f"  Contains 'Keine Daten': {'YES' if 'Keine Daten' in page_text else 'NO'}")
     print(f"  Contains 'Keine Einträge': {'YES' if 'Keine Einträge' in page_text else 'NO'}")
     print(f"  Contains 'Fehlstunden': {'YES' if 'Fehlstunden' in page_text else 'NO'}")
+    print(f"  Contains 'Nichts anzuzeigen': {'YES' if 'Nichts anzuzeigen' in page_text else 'NO'}")
 
 
 def main() -> int:
@@ -54,7 +56,7 @@ def main() -> int:
         print("A Chromium window will open. Do not type anything unless the test stops with an error.")
         print()
 
-        page = fetch_absence_html_browser(settings, start, end, headless=False)
+        page = fetch_absence_html_browser_v2(settings, start, end, headless=False)
 
         output_dir = Path("reports")
         output_dir.mkdir(parents=True, exist_ok=True)
