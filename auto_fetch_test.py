@@ -7,21 +7,25 @@ import sys
 from absence_html_parser import parse_absence_rows, write_detail_csv, write_summary_csv
 from browser_automation import BrowserAutomationError, fetch_absence_html_browser
 from config import load_settings
-from webuntis_client import WebUntisClient
+
+
+def _default_schoolyear_range(today: date) -> tuple[date, date]:
+    """Return a practical school-year range without using the legacy API.
+
+    WebUntis itself restricts the submitted range to the current school year.
+    START_DATE and END_DATE in .env still override these defaults.
+    """
+    start_year = today.year if today.month >= 8 else today.year - 1
+    return date(start_year, 9, 1), today
 
 
 def main() -> int:
     try:
         settings = load_settings()
 
-        # Reuse the already-working app/QR authentication only to determine the
-        # current school-year boundaries. The actual absence page is fetched in
-        # a real browser session below.
-        with WebUntisClient(settings) as client:
-            schoolyear_start, schoolyear_end = client.current_schoolyear_dates()
-
-        start = settings.start_date or schoolyear_start
-        end = settings.end_date or min(date.today(), schoolyear_end)
+        default_start, default_end = _default_schoolyear_range(date.today())
+        start = settings.start_date or default_start
+        end = settings.end_date or default_end
 
         print("=== AUTOMATIC BROWSER TEST ===")
         print(f"Class: {settings.class_name} ({settings.class_id})")
