@@ -119,8 +119,6 @@ def _semantic_otp_input(page: Page):
 
 
 def _fallback_otp_input(page: Page):
-    # Only call this after the password field has disappeared. Otherwise the one
-    # remaining text field is usually still the username field on a failed login.
     visible_text_inputs = []
     locator = page.locator('input[type="text"], input:not([type])')
     for i in range(locator.count()):
@@ -134,20 +132,24 @@ def _fallback_otp_input(page: Page):
 
 
 def _otp_secret(settings: Settings) -> str:
-    if settings.app_secret:
-        return settings.app_secret.replace(" ", "")
+    """Use the same credential priority as the already-working app login.
+
+    A stale WEBUNTIS_APP_SECRET may coexist with a newer valid QR URI. The app
+    login prefers WEBUNTIS_QR_URI, so browser automation must do the same.
+    """
     if settings.qr_uri:
         _server, _school, _username, secret = parse_qr_uri(settings.qr_uri)
         return secret.replace(" ", "")
+    if settings.app_secret:
+        return settings.app_secret.replace(" ", "")
     raise BrowserAutomationError(
-        "A 2FA field appeared, but neither WEBUNTIS_APP_SECRET nor WEBUNTIS_QR_URI contains a secret."
+        "A 2FA field appeared, but neither WEBUNTIS_QR_URI nor WEBUNTIS_APP_SECRET contains a secret."
     )
 
 
 def _fresh_otp(secret: str) -> str:
     totp = pyotp.TOTP(secret)
     remaining = totp.interval - (time.time() % totp.interval)
-    # Do not submit a code that is about to expire while the browser is clicking.
     if remaining < 8:
         time.sleep(remaining + 0.7)
     return totp.now()
@@ -183,7 +185,6 @@ def _login(page: Page, settings: Settings) -> None:
     password.fill(settings.password)
     _click_submit(page)
 
-    # Wait for either a genuine 2FA step or for the password form to disappear.
     otp_input = None
     deadline = time.time() + 12
     while time.time() < deadline:
@@ -208,7 +209,6 @@ def _login(page: Page, settings: Settings) -> None:
     if otp_input is not None:
         secret = _otp_secret(settings)
 
-        # Retry once with a fresh time window if WebUntis rejects the first code.
         for attempt in range(2):
             otp = _fresh_otp(secret)
             otp_input.fill(otp)
@@ -223,7 +223,6 @@ def _login(page: Page, settings: Settings) -> None:
                     return
 
             if attempt == 0:
-                # Wait for the next TOTP window before the one permitted retry.
                 totp = pyotp.TOTP(secret)
                 remaining = totp.interval - (time.time() % totp.interval)
                 time.sleep(remaining + 0.7)
@@ -234,12 +233,10 @@ def _login(page: Page, settings: Settings) -> None:
         error = _visible_error_text(page)
         suffix = f" Visible error: {error}" if error else ""
         raise BrowserAutomationError(
-            "The WebUntis 2FA code was rejected twice. Check that WEBUNTIS_APP_SECRET belongs to this account "
-            "and that the Windows clock is set automatically." + suffix
+            "The WebUntis 2FA code was rejected twice. Make sure the QR/app key in .env is the same one "
+            "currently used by FreeOTP, and ensure the Windows clock is set automatically." + suffix
         )
 
-    # No OTP field appeared. If the login form has gone, the account may have
-    # trusted this browser or completed login without a second step.
     page.wait_for_timeout(1200)
 
 
