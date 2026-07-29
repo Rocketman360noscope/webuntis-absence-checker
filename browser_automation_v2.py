@@ -6,8 +6,9 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-from browser_automation import BrowserAutomationError, _login, _safe_form_description
+from browser_automation import BrowserAutomationError, _safe_form_description
 from config import Settings
+from safe_browser_login import login_once
 
 
 def _yyyymmdd(value: date) -> int:
@@ -135,7 +136,7 @@ def fetch_absence_html_browser_v2(
         context = browser.new_context(locale="de-DE")
         page = context.new_page()
         try:
-            _login(page, settings)
+            login_once(page, settings)
             return _submit_absence_filter_direct(page, settings, start, end)
         finally:
             browser.close()
