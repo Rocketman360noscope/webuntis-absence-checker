@@ -9,7 +9,6 @@ import pyotp
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from config import Settings
-from qr_auth import parse_qr_uri
 
 
 class BrowserAutomationError(RuntimeError):
@@ -132,18 +131,17 @@ def _fallback_otp_input(page: Page):
 
 
 def _otp_secret(settings: Settings) -> str:
-    """Use the same credential priority as the already-working app login.
+    """Return the dedicated secret for the normal WebUntis browser 2FA.
 
-    A stale WEBUNTIS_APP_SECRET may coexist with a newer valid QR URI. The app
-    login prefers WEBUNTIS_QR_URI, so browser automation must do the same.
+    WebUntis uses a different key for Untis Mobile access. Therefore the mobile
+    QR URI and WEBUNTIS_APP_SECRET must never be used for the browser login code.
     """
-    if settings.qr_uri:
-        _server, _school, _username, secret = parse_qr_uri(settings.qr_uri)
-        return secret.replace(" ", "")
-    if settings.app_secret:
-        return settings.app_secret.replace(" ", "")
+    secret = settings.totp_secret.replace(" ", "")
+    if secret:
+        return secret
     raise BrowserAutomationError(
-        "A 2FA field appeared, but neither WEBUNTIS_QR_URI nor WEBUNTIS_APP_SECRET contains a secret."
+        "A browser 2FA field appeared, but WEBUNTIS_TOTP_SECRET is empty. "
+        "Enter the separate key from WebUntis Two-Factor Authentication, not the Untis Mobile access key."
     )
 
 
@@ -233,8 +231,8 @@ def _login(page: Page, settings: Settings) -> None:
         error = _visible_error_text(page)
         suffix = f" Visible error: {error}" if error else ""
         raise BrowserAutomationError(
-            "The WebUntis 2FA code was rejected twice. Make sure the QR/app key in .env is the same one "
-            "currently used by FreeOTP, and ensure the Windows clock is set automatically." + suffix
+            "The WebUntis browser 2FA code was rejected twice. Check that WEBUNTIS_TOTP_SECRET is the "
+            "separate Two-Factor Authentication key currently used by FreeOTP." + suffix
         )
 
     page.wait_for_timeout(1200)
