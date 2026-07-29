@@ -42,6 +42,31 @@ def _looks_like_time(value: str) -> bool:
     return bool(re.fullmatch(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", _clean(value)))
 
 
+def _date_sort_key(value: str) -> tuple[int, int, int]:
+    try:
+        day, month, year = (int(part) for part in value.split("."))
+        return year, month, day
+    except (TypeError, ValueError):
+        return 9999, 12, 31
+
+
+def _time_bounds(value: str) -> tuple[str, str]:
+    match = re.fullmatch(r"\s*(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\s*", value or "")
+    return match.groups() if match else ("", "")
+
+
+def _unique_text(values: list[str]) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _clean(value)
+        marker = cleaned.casefold()
+        if cleaned and marker not in seen:
+            seen.add(marker)
+            result.append(cleaned)
+    return " | ".join(result)
+
+
 def parse_absence_rows(page: str) -> list[AbsenceRow]:
     """Parse rendered WebUntis absence rows using the date cell as anchor."""
     soup = BeautifulSoup(page, "html.parser")
@@ -129,13 +154,63 @@ def write_detail_csv(rows: list[AbsenceRow], path: Path) -> None:
             ])
 
 
+def write_daily_csv(rows: list[AbsenceRow], path: Path) -> int:
+    """Write one row per student and date while retaining WebUntis totals."""
+    groups: dict[tuple[str, str, str], list[AbsenceRow]] = defaultdict(list)
+    for row in rows:
+        groups[(row.student, row.class_name, row.date)].append(row)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow([
+            "Schüler*in", "Klasse", "Datum", "Beginn", "Ende",
+            "Unterrichtseinträge", "Fehltage", "Fehlstunden", "Fehlminuten",
+            "Verspätung", "Abwesenheitsgründe", "Status", "Fächer"
+        ])
+
+        ordered_keys = sorted(
+            groups,
+            key=lambda key: (key[0].casefold(), _date_sort_key(key[2]), key[1].casefold()),
+        )
+        for student, class_name, date_value in ordered_keys:
+            group = groups[(student, class_name, date_value)]
+            starts: list[str] = []
+            ends: list[str] = []
+            for row in group:
+                start, end = _time_bounds(row.time)
+                if start:
+                    starts.append(start)
+                if end:
+                    ends.append(end)
+
+            writer.writerow([
+                student,
+                class_name,
+                date_value,
+                min(starts) if starts else "",
+                max(ends) if ends else "",
+                len(group),
+                sum(row.absent_days for row in group),
+                sum(row.absent_hours for row in group),
+                sum(row.absent_minutes for row in group),
+                "ja" if any("verspät" in row.reason.casefold() for row in group) else "nein",
+                _unique_text([row.reason for row in group]),
+                _unique_text([row.status for row in group]),
+                _unique_text([row.subject for row in group]),
+            ])
+
+    return len(groups)
+
+
 def write_summary_csv(rows: list[AbsenceRow], path: Path) -> None:
-    summary: dict[str, dict[str, int]] = defaultdict(lambda: {
+    summary: dict[str, dict[str, object]] = defaultdict(lambda: {
         "entries": 0,
+        "dates": set(),
         "days": 0,
         "hours": 0,
         "minutes": 0,
-        "late_entries": 0,
+        "late_dates": set(),
         "excused_entries": 0,
         "unexcused_entries": 0,
         "open_entries": 0,
@@ -143,32 +218,51 @@ def write_summary_csv(rows: list[AbsenceRow], path: Path) -> None:
 
     for row in rows:
         item = summary[row.student]
-        item["entries"] += 1
-        item["days"] += row.absent_days
-        item["hours"] += row.absent_hours
-        item["minutes"] += row.absent_minutes
+        item["entries"] = int(item["entries"]) + 1
+        cast_dates = item["dates"]
+        assert isinstance(cast_dates, set)
+        cast_dates.add(row.date)
+        item["days"] = int(item["days"]) + row.absent_days
+        item["hours"] = int(item["hours"]) + row.absent_hours
+        item["minutes"] = int(item["minutes"]) + row.absent_minutes
 
         if "verspät" in row.reason.casefold():
-            item["late_entries"] += 1
+            late_dates = item["late_dates"]
+            assert isinstance(late_dates, set)
+            late_dates.add(row.date)
 
         status = row.status.casefold()
         if "unentsch" in status or "nicht entsch" in status:
-            item["unexcused_entries"] += 1
+            item["unexcused_entries"] = int(item["unexcused_entries"]) + 1
         elif "entsch" in status:
-            item["excused_entries"] += 1
+            item["excused_entries"] = int(item["excused_entries"]) + 1
         elif "offen" in status or not status:
-            item["open_entries"] += 1
+            item["open_entries"] = int(item["open_entries"]) + 1
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle, delimiter=";")
         writer.writerow([
-            "Schüler*in", "Einträge", "Fehltage", "Fehlstunden", "Fehlminuten",
-            "Verspätungs-Einträge", "Entschuldigte Einträge", "Unentschuldigte Einträge", "Offene/unklare Einträge"
+            "Schüler*in", "Unterrichtseinträge", "Tage mit Einträgen",
+            "Fehltage", "Fehlstunden", "Fehlminuten", "Verspätungstage",
+            "Entschuldigte Unterrichtseinträge", "Unentschuldigte Unterrichtseinträge",
+            "Offene/unklare Unterrichtseinträge"
         ])
         for student in sorted(summary, key=str.casefold):
             item = summary[student]
+            dates = item["dates"]
+            late_dates = item["late_dates"]
+            assert isinstance(dates, set)
+            assert isinstance(late_dates, set)
             writer.writerow([
-                student, item["entries"], item["days"], item["hours"], item["minutes"],
-                item["late_entries"], item["excused_entries"], item["unexcused_entries"], item["open_entries"],
+                student,
+                item["entries"],
+                len(dates),
+                item["days"],
+                item["hours"],
+                item["minutes"],
+                len(late_dates),
+                item["excused_entries"],
+                item["unexcused_entries"],
+                item["open_entries"],
             ])
