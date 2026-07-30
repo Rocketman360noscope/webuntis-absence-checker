@@ -4,7 +4,7 @@ from datetime import date
 import json
 import time
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from browser_automation import BrowserAutomationError, _safe_form_description
 from config import Settings
@@ -13,6 +13,60 @@ from safe_browser_login import login_once
 
 def _yyyymmdd(value: date) -> int:
     return value.year * 10000 + value.month * 100 + value.day
+
+
+def _open_authenticated_absence_page(page, settings: Settings) -> str:
+    """Open the absence filter and wait for its server-rendered class selector.
+
+    A second GET is allowed when WebUntis briefly serves an empty transition page.
+    This never repeats the password or 2FA login attempt.
+    """
+    embedded = f"https://{settings.server}/WebUntis/embedded.do?showSidebar=true"
+    page.goto(embedded, wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(1200)
+
+    last_status: int | None = None
+    last_url = page.url
+
+    for attempt in range(2):
+        cache_buster = str(int(time.time() * 1000))
+        url = f"https://{settings.server}/WebUntis/absencetimes.do?request.preventCache={cache_buster}"
+        response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        last_status = response.status if response is not None else None
+        last_url = page.url
+
+        if last_status == 403:
+            raise BrowserAutomationError(
+                "WebUntis returned 403 when opening the absence page after browser login. "
+                "No additional login attempt was made."
+            )
+
+        try:
+            page.wait_for_selector("#klasseOrStudentgroupId", state="attached", timeout=12_000)
+            return url
+        except PlaywrightTimeoutError:
+            if attempt == 0:
+                # Harmless navigation retry only; credentials and OTP are not submitted again.
+                page.goto(embedded, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(2000)
+                continue
+
+    try:
+        title = page.title()
+    except Exception:
+        title = ""
+    try:
+        html_chars = len(page.content())
+    except Exception:
+        html_chars = 0
+
+    raise BrowserAutomationError(
+        "Logged-in absence filter was not found after waiting and one safe page reload. "
+        f"HTTP status: {last_status or '-'}, current URL: {last_url}, "
+        f"page title: {title or '-'}, HTML characters: {html_chars}. "
+        "No additional password or 2FA attempt was made. Visible form: "
+        + _safe_form_description(page)
+    )
 
 
 def _submit_absence_filter_direct(
@@ -28,33 +82,14 @@ def _submit_absence_filter_direct(
     function bypasses that widget and sends the intended form values directly
     from the already-authenticated browser context.
     """
-    embedded = f"https://{settings.server}/WebUntis/embedded.do?showSidebar=true"
-    page.goto(embedded, wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_timeout(1000)
-
-    cache_buster = str(int(time.time() * 1000))
-    url = f"https://{settings.server}/WebUntis/absencetimes.do?request.preventCache={cache_buster}"
-    response = page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    page.wait_for_timeout(1000)
-
-    if response is not None and response.status == 403:
-        raise BrowserAutomationError(
-            "WebUntis returned 403 when opening the absence page after browser login. "
-            "Login may not have completed. Visible form: " + _safe_form_description(page)
-        )
-
-    if page.locator("#klasseOrStudentgroupId").count() == 0:
-        raise BrowserAutomationError(
-            "Logged-in absence filter was not found. Current URL: "
-            + page.url
-            + ". Visible form: "
-            + _safe_form_description(page)
-        )
+    url = _open_authenticated_absence_page(page, settings)
 
     csrf = page.locator('input[name="_csrf"]').get_attribute("value")
     if not csrf:
         raise BrowserAutomationError("The logged-in absence page did not contain a CSRF token.")
 
+    cache_buster = str(int(time.time() * 1000))
+    post_url = f"https://{settings.server}/WebUntis/absencetimes.do?request.preventCache={cache_buster}"
     date_range = {
         "name": "",
         "id": -1,
@@ -102,7 +137,7 @@ def _submit_absence_filter_direct(
         }
         """,
         [
-            url,
+            post_url,
             cache_buster,
             settings.class_id,
             json.dumps(date_range, separators=(",", ":")),
