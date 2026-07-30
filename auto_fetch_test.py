@@ -16,6 +16,13 @@ from absence_html_parser import (
 )
 from browser_automation import BrowserAutomationError
 from browser_automation_v2 import fetch_absence_html_browser_v2
+from change_tracking import (
+    compare_rows,
+    load_snapshot,
+    safe_change_summary,
+    save_snapshot,
+    write_changes_csv,
+)
 from config import load_settings
 
 
@@ -70,6 +77,8 @@ def main() -> int:
         detail_output = output_dir / f"{settings.class_name}_absences_detail_auto.csv"
         daily_output = output_dir / f"{settings.class_name}_absences_daily_auto.csv"
         summary_output = output_dir / f"{settings.class_name}_absences_summary_auto.csv"
+        changes_output = output_dir / f"{settings.class_name}_absence_changes_latest.csv"
+        snapshot_output = output_dir / f"{settings.class_name}_absence_snapshot.json"
 
         # Always preserve the fetched response before parsing. This remains local
         # and is ignored by Git because it can contain sensitive student data.
@@ -93,9 +102,24 @@ def main() -> int:
                 f"Absence rows were parsed, but none belonged to configured class {settings.class_name}."
             )
 
+        previous_snapshot = load_snapshot(snapshot_output)
+
         write_detail_csv(rows, detail_output)
         daily_count = write_daily_csv(rows, daily_output)
         write_summary_csv(rows, summary_output)
+
+        if previous_snapshot is None:
+            changes = []
+            comparison_message = (
+                "No previous snapshot existed. The current data was stored as the comparison baseline."
+            )
+        else:
+            changes = compare_rows(previous_snapshot, rows)
+            comparison_message = f"Changes since previous successful run: {len(changes)}"
+
+        write_changes_csv(changes, changes_output)
+        # Save the new baseline only after all report files were written successfully.
+        save_snapshot(rows, snapshot_output)
 
         print()
         print("SUCCESS: Fully automatic browser fetch worked.")
@@ -105,9 +129,20 @@ def main() -> int:
             excluded = sum(foreign_classes.values())
             classes = ", ".join(f"{name}: {count}" for name, count in sorted(foreign_classes.items()))
             print(f"Excluded rows outside {settings.class_name}: {excluded} ({classes})")
+        print(comparison_message)
+        if changes:
+            change_counts = safe_change_summary(changes)
+            print(
+                "Change types: "
+                + ", ".join(
+                    f"{name}: {count}" for name, count in sorted(change_counts.items())
+                )
+            )
         print(f"Detail CSV:  {detail_output}")
         print(f"Daily CSV:   {daily_output}")
         print(f"Summary CSV: {summary_output}")
+        print(f"Changes CSV: {changes_output}")
+        print(f"Snapshot:    {snapshot_output}")
         return 0
 
     except BrowserAutomationError as exc:
